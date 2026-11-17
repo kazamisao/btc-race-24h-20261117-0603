@@ -22,6 +22,14 @@
 // After any exit, no new entry for 60 bars: no immediate re-buy into the
 // same move that just stopped the bot out.
 //
+// A sell is only *sent* on an exit bar — the position is not treated as
+// closed until the next batch shows it gone (its fill landed at that bar's
+// open). Only then are the entry state cleared and the cooldown armed, so a
+// sell the replay rejects (no bar at the fill's open, or a gap past the
+// slippage cap) is simply sent again on the next bar while its exit reason
+// still holds, with the take-profit and hard stop still measured from the
+// original entry — never silently re-based.
+//
 // Costs: a full-size round trip pays ~26 bps (4 bps fee + 2 bps slippage +
 // ~7 bps impact each way), so every leg above must catch a move far bigger
 // than that. Orders cap slippage at 150 bps vs the latest close.
@@ -88,6 +96,9 @@ function log(msg: string): void {
 
 await runBars({
   onBatch(state: BarsState) {
+    // Defensive: this competition defines no warm-up, but an order decided
+    // on a warm-up batch would only be rejected, so never send one.
+    if (state.warmingUp) return [];
     const close = state.close(SYMBOL);
     if (close === null) return [];
     closes.push(close);
@@ -97,33 +108,34 @@ await runBars({
     const held = state.positions.get(SYMBOL);
     if (held !== undefined) {
       if (peak === null || close > peak) peak = close;
+      // entryClose is always set while holding; fall back to this close
+      // only so no path can throw.
       const entry = entryClose ?? close;
       if (retAtLeast(close, entry, TAKE_BPS)) {
         log(`seq ${seq}: SELL take-profit, close ${close}, entry ${entry}`);
-        peak = null;
-        entryClose = null;
-        coolUntil = seq + COOLDOWN_BARS;
         return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies SellInput];
       }
       if (peak !== null && (peak - close) * 10000n >= TRAIL_BPS * peak) {
         log(`seq ${seq}: SELL trailing stop ${TRAIL_BPS} bps below peak ${peak}, close ${close}`);
-        peak = null;
-        entryClose = null;
-        coolUntil = seq + COOLDOWN_BARS;
         return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies SellInput];
       }
       if ((entry - close) * 10000n >= STOP_BPS * entry) {
         log(`seq ${seq}: SELL hard stop ${STOP_BPS} bps below entry ${entry}, close ${close}`);
-        peak = null;
-        entryClose = null;
-        coolUntil = seq + COOLDOWN_BARS;
         return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies SellInput];
       }
       return [];
     }
 
-    peak = null;
-    entryClose = null;
+    // Flat: if we were holding, the sell has filled (its fill landed at
+    // this bar's open) — only now clear the entry state and arm the
+    // cooldown. A sell the replay rejected leaves the position held, so the
+    // branch above re-sends it while its exit reason still holds.
+    if (entryClose !== null) {
+      log(`seq ${seq}: position closed, cooldown until ${seq + COOLDOWN_BARS}`);
+      peak = null;
+      entryClose = null;
+      coolUntil = seq + COOLDOWN_BARS;
+    }
     if (seq <= coolUntil) return [];
     // Need a full trend window before any entry can be judged.
     if (n <= TREND_LOOKBACK) return [];
