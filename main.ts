@@ -129,12 +129,15 @@ await runBars({
     // Flat: if we were holding, the sell has filled (its fill landed at
     // this bar's open) — only now clear the entry state and arm the
     // cooldown. A sell the replay rejected leaves the position held, so the
-    // branch above re-sends it while its exit reason still holds.
+    // branch above re-sends it while its exit reason still holds. The fill
+    // landed at this bar's open, one bar after the exit was decided, so the
+    // cooldown runs to (this seq + 60 - 1): the same 60 barred batches as
+    // counting from the decision bar.
     if (entryClose !== null) {
-      log(`seq ${seq}: position closed, cooldown until ${seq + COOLDOWN_BARS}`);
+      log(`seq ${seq}: position closed, cooldown until ${seq + COOLDOWN_BARS - 1}`);
       peak = null;
       entryClose = null;
-      coolUntil = seq + COOLDOWN_BARS;
+      coolUntil = seq + COOLDOWN_BARS - 1;
     }
     if (seq <= coolUntil) return [];
     // Need a full trend window before any entry can be judged.
